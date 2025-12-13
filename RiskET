@@ -1,0 +1,346 @@
+import pandas as pd
+import numpy as np
+from datetime import datetime
+import warnings
+warnings.filterwarnings('ignore')
+
+class ExpenseRiskAnalyzer:
+    def __init__(self, df):
+        """Initialize the risk analyzer with expense dataframe"""
+        self.df = df.copy()
+        self._prepare_data()
+        
+    def _prepare_data(self):
+        """Prepare and clean data for analysis"""
+        # Convert date columns
+        date_cols = ['Payment Date', 'Invoice Date']
+        for col in date_cols:
+            self.df[col] = pd.to_datetime(self.df[col], errors='coerce')
+        
+        # Convert numeric columns
+        numeric_cols = ['Invoice Amount', 'Tax Amount', 'Cost Variance', 
+                       'historical_avg_spend_dept', 'budget_allocated', 
+                       'budget_remaining', 'Total Expenses', 'Total Revenue']
+        for col in numeric_cols:
+            self.df[col] = pd.to_numeric(self.df[col], errors='coerce')
+        
+        # Calculate payment lag
+        self.df['payment_lag_days'] = (self.df['Payment Date'] - self.df['Invoice Date']).dt.days
+        
+        # Calculate expense to revenue ratio
+        self.df['expense_revenue_ratio'] = self.df['Total Expenses'] / self.df['Total Revenue'].replace(0, np.nan)
+        
+    def payment_risk_analysis(self):
+        """Analyze payment-related risks"""
+        print("="*80)
+        print("1. PAYMENT STATUS RISK ANALYSIS")
+        print("="*80)
+        
+        # Payment status breakdown
+        payment_summary = self.df.groupby('Payment Status').agg({
+            'Invoice Amount': ['count', 'sum', 'mean']
+        }).round(2)
+        print("\nPayment Status Summary:")
+        print(payment_summary)
+        
+        # Critical overdue payments
+        overdue = self.df[self.df['Payment Status'] == 'Overdue'].copy()
+        overdue['days_overdue'] = (datetime.now() - overdue['Payment Date']).dt.days
+        
+        if len(overdue) > 0:
+            print(f"\n⚠️ CRITICAL: {len(overdue)} Overdue Payments")
+            print(f"   Total Amount: ${overdue['Invoice Amount'].sum():,.2f}")
+            print(f"\n   Top 5 Overdue by Amount:")
+            top_overdue = overdue.nlargest(5, 'Invoice Amount')[
+                ['Department', 'Vendor Name', 'Invoice Amount', 'days_overdue']
+            ]
+            print(top_overdue.to_string())
+        
+        # Long pending payments
+        pending = self.df[self.df['Payment Status'] == 'Pending']
+        if len(pending) > 0:
+            print(f"\n⚠️ {len(pending)} Pending Payments")
+            print(f"   Total Amount: ${pending['Invoice Amount'].sum():,.2f}")
+        
+        return overdue, pending
+    
+    def budget_variance_risk(self):
+        """Analyze budget variance and overrun risks"""
+        print("\n" + "="*80)
+        print("2. BUDGET VARIANCE RISK ANALYSIS")
+        print("="*80)
+        
+        # Identify budget overruns
+        overruns = self.df[self.df['Cost Variance'] < 0].copy()
+        overruns['overrun_pct'] = (abs(overruns['Cost Variance']) / 
+                                   overruns['budget_allocated'] * 100)
+        
+        print(f"\n⚠️ {len(overruns)} Transactions with Budget Overruns")
+        print(f"   Total Variance: ${overruns['Cost Variance'].sum():,.2f}")
+        
+        # Severe overruns (>50% over budget or >$3000)
+        severe = overruns[
+            (overruns['overrun_pct'] > 50) | 
+            (abs(overruns['Cost Variance']) > 3000)
+        ]
+        
+        if len(severe) > 0:
+            print(f"\n🔴 CRITICAL: {len(severe)} Severe Budget Overruns")
+            print("\n   Top 5 by Variance Amount:")
+            severe_top = severe.nlargest(5, 'Cost Variance', keep='first')[
+                ['Department', 'Expense Category', 'Cost Variance', 'overrun_pct']
+            ]
+            print(severe_top.to_string())
+        
+        # Department-level budget analysis
+        dept_budget = self.df.groupby('Department').agg({
+            'Cost Variance': 'sum',
+            'budget_allocated': 'sum',
+            'Total Expenses': 'sum'
+        }).round(2)
+        dept_budget['variance_pct'] = (dept_budget['Cost Variance'] / 
+                                       dept_budget['budget_allocated'] * 100).round(2)
+        
+        print("\n   Budget Status by Department:")
+        print(dept_budget.sort_values('Cost Variance'))
+        
+        return overruns, severe
+    
+    def vendor_concentration_risk(self):
+        """Analyze vendor concentration and dependency risks"""
+        print("\n" + "="*80)
+        print("3. VENDOR CONCENTRATION RISK ANALYSIS")
+        print("="*80)
+        
+        # Vendor analysis
+        vendor_stats = self.df.groupby('Vendor Name').agg({
+            'Invoice Amount': ['count', 'sum', 'mean']
+        }).round(2)
+        vendor_stats.columns = ['Transaction_Count', 'Total_Amount', 'Avg_Amount']
+        vendor_stats['Pct_of_Total'] = (
+            vendor_stats['Total_Amount'] / self.df['Invoice Amount'].sum() * 100
+        ).round(2)
+        vendor_stats = vendor_stats.sort_values('Total_Amount', ascending=False)
+        
+        print("\n   Top 5 Vendors by Transaction Volume:")
+        print(vendor_stats.head())
+        
+        # High concentration warning
+        top_vendor_pct = vendor_stats.iloc[0]['Pct_of_Total']
+        if top_vendor_pct > 20:
+            print(f"\n⚠️ HIGH CONCENTRATION RISK:")
+            print(f"   Top vendor represents {top_vendor_pct:.1f}% of total spending")
+            print(f"   Recommendation: Diversify vendor base")
+        
+        # Vendor type analysis
+        vendor_type_stats = self.df.groupby('Vendor Type').agg({
+            'Invoice Amount': ['count', 'sum']
+        }).round(2)
+        print("\n   Spending by Vendor Type:")
+        print(vendor_type_stats)
+        
+        return vendor_stats
+    
+    def payment_lag_risk(self):
+        """Analyze invoice-to-payment lag risks"""
+        print("\n" + "="*80)
+        print("4. PAYMENT LAG RISK ANALYSIS")
+        print("="*80)
+        
+        # Filter valid payment lags
+        lag_data = self.df[self.df['payment_lag_days'].notna()].copy()
+        
+        print(f"\n   Average Payment Lag: {lag_data['payment_lag_days'].mean():.1f} days")
+        print(f"   Median Payment Lag: {lag_data['payment_lag_days'].median():.1f} days")
+        print(f"   Max Payment Lag: {lag_data['payment_lag_days'].max():.0f} days")
+        
+        # Excessive delays (>45 days)
+        long_lag = lag_data[lag_data['payment_lag_days'] > 45]
+        
+        if len(long_lag) > 0:
+            print(f"\n⚠️ {len(long_lag)} Transactions with Excessive Payment Lag (>45 days)")
+            print("\n   Top 5 by Payment Lag:")
+            top_lag = long_lag.nlargest(5, 'payment_lag_days')[
+                ['Department', 'Vendor Name', 'Invoice Amount', 'payment_lag_days', 'Payment Status']
+            ]
+            print(top_lag.to_string())
+        
+        # Department-wise lag analysis
+        dept_lag = lag_data.groupby('Department')['payment_lag_days'].agg([
+            'mean', 'median', 'max'
+        ]).round(1)
+        print("\n   Payment Lag by Department:")
+        print(dept_lag.sort_values('mean', ascending=False))
+        
+        return long_lag
+    
+    def revenue_expense_risk(self):
+        """Analyze revenue vs expense mismatch"""
+        print("\n" + "="*80)
+        print("5. REVENUE vs EXPENSE RISK ANALYSIS")
+        print("="*80)
+        
+        # Unprofitable transactions
+        unprofitable = self.df[self.df['expense_revenue_ratio'] > 1].copy()
+        
+        if len(unprofitable) > 0:
+            print(f"\n⚠️ {len(unprofitable)} Transactions where Expenses > Revenue")
+            print("\n   Top 5 by Expense/Revenue Ratio:")
+            top_unprofitable = unprofitable.nlargest(5, 'expense_revenue_ratio')[
+                ['Department', 'Total Expenses', 'Total Revenue', 'expense_revenue_ratio']
+            ]
+            top_unprofitable['expense_revenue_ratio'] = top_unprofitable['expense_revenue_ratio'].round(2)
+            print(top_unprofitable.to_string())
+        
+        # Department profitability
+        dept_profit = self.df.groupby('Department').agg({
+            'Total Expenses': 'sum',
+            'Total Revenue': 'sum'
+        }).round(2)
+        dept_profit['Net'] = dept_profit['Total Revenue'] - dept_profit['Total Expenses']
+        dept_profit['Margin_Pct'] = (
+            dept_profit['Net'] / dept_profit['Total Revenue'] * 100
+        ).round(2)
+        
+        print("\n   Department Profitability:")
+        print(dept_profit.sort_values('Margin_Pct'))
+        
+        return unprofitable
+    
+    def department_risk_score(self):
+        """Calculate comprehensive risk score by department"""
+        print("\n" + "="*80)
+        print("6. DEPARTMENT RISK SCORE")
+        print("="*80)
+        
+        dept_risk = self.df.groupby('Department').agg({
+            'Invoice Amount': 'count',
+            'Payment Status': lambda x: (x == 'Overdue').sum(),
+            'Cost Variance': lambda x: (x < 0).sum(),
+            'Total Expenses': 'sum',
+            'Total Revenue': 'sum'
+        })
+        
+        dept_risk.columns = ['Total_Trans', 'Overdue_Count', 'Budget_Overrun_Count', 
+                            'Total_Expenses', 'Total_Revenue']
+        
+        # Calculate risk components
+        dept_risk['Overdue_Rate'] = (dept_risk['Overdue_Count'] / dept_risk['Total_Trans'] * 100).round(1)
+        dept_risk['Overrun_Rate'] = (dept_risk['Budget_Overrun_Count'] / dept_risk['Total_Trans'] * 100).round(1)
+        dept_risk['Expense_Revenue_Ratio'] = (dept_risk['Total_Expenses'] / dept_risk['Total_Revenue']).round(2)
+        
+        # Risk Score (0-100)
+        dept_risk['Risk_Score'] = (
+            dept_risk['Overdue_Rate'] * 0.4 +
+            dept_risk['Overrun_Rate'] * 0.4 +
+            (dept_risk['Expense_Revenue_Ratio'] - 0.5) * 20
+        ).clip(0, 100).round(0)
+        
+        dept_risk['Risk_Level'] = pd.cut(
+            dept_risk['Risk_Score'],
+            bins=[0, 30, 60, 100],
+            labels=['Medium', 'High', 'Critical']
+        )
+        
+        print("\n   Risk Scores by Department:")
+        print(dept_risk.sort_values('Risk_Score', ascending=False).to_string())
+        
+        return dept_risk
+    
+    def contract_risk_analysis(self):
+        """Analyze contract duration and commitment risks"""
+        print("\n" + "="*80)
+        print("7. CONTRACT & COMMITMENT RISK ANALYSIS")
+        print("="*80)
+        
+        # Long-term contracts with issues
+        long_contracts = self.df[
+            (self.df['Contract Duration'] >= 24) & 
+            ((self.df['Cost Variance'] < 0) | (self.df['Payment Status'] == 'Overdue'))
+        ]
+        
+        if len(long_contracts) > 0:
+            print(f"\n⚠️ {len(long_contracts)} Long-term Contracts (≥24 months) with Issues")
+            print("\n   Sample:")
+            print(long_contracts[
+                ['Department', 'Vendor Name', 'Contract Duration', 
+                 'Cost Variance', 'Payment Status']
+            ].head(10).to_string())
+        
+        # No contract protection
+        no_contract = self.df[self.df['Contract Duration'] == 0]
+        print(f"\n   {len(no_contract)} Transactions without Contract Protection")
+        print(f"   Total Amount at Risk: ${no_contract['Invoice Amount'].sum():,.2f}")
+        
+        return long_contracts
+    
+    def generate_summary_report(self):
+        """Generate executive summary of all risks"""
+        print("\n" + "="*80)
+        print("EXECUTIVE RISK SUMMARY")
+        print("="*80)
+        
+        total_records = len(self.df)
+        total_amount = self.df['Invoice Amount'].sum()
+        
+        overdue_count = len(self.df[self.df['Payment Status'] == 'Overdue'])
+        overdue_amount = self.df[self.df['Payment Status'] == 'Overdue']['Invoice Amount'].sum()
+        
+        overrun_count = len(self.df[self.df['Cost Variance'] < 0])
+        overrun_amount = abs(self.df[self.df['Cost Variance'] < 0]['Cost Variance'].sum())
+        
+        unprofitable_count = len(self.df[self.df['expense_revenue_ratio'] > 1])
+        
+        print(f"""
+📊 Dataset Overview:
+   • Total Transactions: {total_records}
+   • Total Amount: ${total_amount:,.2f}
+   
+🔴 Critical Risks:
+   • Overdue Payments: {overdue_count} ({overdue_count/total_records*100:.1f}%)
+     Amount: ${overdue_amount:,.2f}
+   
+   • Budget Overruns: {overrun_count} ({overrun_count/total_records*100:.1f}%)
+     Total Variance: ${overrun_amount:,.2f}
+   
+   • Unprofitable Transactions: {unprofitable_count} ({unprofitable_count/total_records*100:.1f}%)
+
+📋 Recommended Actions:
+   1. Immediate follow-up on {overdue_count} overdue payments
+   2. Review budget allocation for {overrun_count} overrun cases
+   3. Diversify vendor base (top vendor >20% concentration)
+   4. Implement payment tracking for >45 day lags
+   5. Investigate unprofitable departments/projects
+        """)
+    
+    def run_complete_analysis(self):
+        """Run all risk analyses"""
+        print("\n" + "🔍 COMPREHENSIVE EXPENSE RISK ANALYSIS 🔍".center(80))
+        print(f"Analysis Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        
+        self.payment_risk_analysis()
+        self.budget_variance_risk()
+        self.vendor_concentration_risk()
+        self.payment_lag_risk()
+        self.revenue_expense_risk()
+        self.department_risk_score()
+        self.contract_risk_analysis()
+        self.generate_summary_report()
+
+
+# Example usage:
+if __name__ == "__main__":
+    # Load your data
+    # df = pd.read_csv('expenses.csv', sep='\t')  # for TSV file
+    # df = pd.read_csv('expenses.csv')  # for CSV file
+    
+    # For demonstration, create sample data structure
+    print("To use this analyzer:")
+    print("1. Load your data: df = pd.read_csv('your_file.csv', sep='\\t')")
+    print("2. Create analyzer: analyzer = ExpenseRiskAnalyzer(df)")
+    print("3. Run analysis: analyzer.run_complete_analysis()")
+    print("\nOr run individual analyses:")
+    print("   - analyzer.payment_risk_analysis()")
+    print("   - analyzer.budget_variance_risk()")
+    print("   - analyzer.vendor_concentration_risk()")
+    print("   - etc.")
